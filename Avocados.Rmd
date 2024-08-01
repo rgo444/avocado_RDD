@@ -1,0 +1,153 @@
+---
+title: "Avocados"
+output: html_notebook
+---
+
+# Did the start of the 'Avocados from Mexico' campaigns cause an increase in Mexican avocado exports?
+
+#A Causal Inference Project
+
+This Rmd contains the causal inference portion of the project. The EDA was performed with Python and is available in a .ipynb file.
+
+#Load libraries and data
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(rdrobust)
+```
+
+```{r}
+avocado <- read.csv("avocado_cleaned.csv") # Import the cleaned and formatted dataset created during EDA 
+print(head(avocado)) # Check that the dataframe imported proerly (esp. regarding headers and rownames)
+```
+
+```{r}
+print(str(avocado)) # Check the data type and number of observations for each column
+```
+Despite having formatted the 'Time' column in Python, we will need to format it again here in R and it was imported as character strings:
+
+```{r}
+avocado$Time <- ymd(avocado$Time) # Convert 'time' column to date format using the package `lubridate`
+print(str(avocado)) # Check the data type of each column again to make sure the date conversion worked as expected
+```
+# Plot data with the cutpoint for RDA
+
+Based on the EDA, February 1st of 2015 was chosen as the cutpoint for Regression Discontinuity Analysis (RDA). This decision was based on the start of the first major campaign by 'Avocados from Mexico' in SuperBowl XLIX. Given that this organization's marketing efforts have started at almost the same time that the avocado exports and production volumes have soared, it is worthwhile to evaluate if there is a causal relation between the start of their campaigns and avocado sales in Mexico.
+
+```{r}
+# Recreate the scatter plot from the `.ipynb` using ggplot: 
+avo_plot <- avocado %>% ggplot(aes(x=Time, y =Trade_Value, color = Quarter)) +
+  geom_point() + theme_bw() +ylab("Total mexican avocado sales value in $ B USD") 
+
+avo_plot # display plot
+```
+
+```{r}
+# Define the cutpoint 
+cutpoint<- ymd("2015-02-01") # Make a variable storing a date 
+
+# Add the vertical dashed line at the cutpoint (Feb. 1, 2015): 
+avo_plot_cp <- avo_plot + geom_vline(xintercept = as.numeric(cutpoint), linetype = "dashed")
+
+avo_plot_cp
+```
+In addition, adding the regression lines before and after the cutpoint will further help determine what type of RDA should be applied.
+
+```{r}
+# Add column to avocado in order to create before and after groups relative to the cutpoint 
+avocado_grouped  <- avocado %>%  mutate(group = case_when( Time < cutpoint ~ "before_SB", Time >= cutpoint ~ "after_SB"))
+
+# Create ggplot 
+avo_plot_cp_lm <- avocado_grouped %>% ggplot(aes(x=Time, y =Trade_Value, color = Quarter)) +
+  geom_point() + theme_bw() +ylab("Total mexican avocado sales value in $ USD") + 
+  geom_vline(xintercept = as.numeric(cutpoint), linetype = "dashed") +
+  geom_smooth(aes(group = group), color = "black", method = lm)
+
+avo_plot_cp_lm  # display plot
+
+## `geom_smooth()` using formula 'y ~ x'
+```
+
+The scatter plot with regression lines shows that there is a considerable jump in the intercept with the cutpoint. However, the slope of the regression line did not change considerably its direction. In order to calculate the bandwidth, we will be using the RDA Package *rdrobust*
+
+```{r}
+# Determine the size of the bandwidth on either side of the cutpoint 
+bandwidth <- (rdbwselect(y=avocado$Trade_Value, x= as.numeric(avocado$Time), c = as.numeric(cutpoint))) 
+
+bandwidth$bws # Show the bandwidths
+
+```
+h, the main bandwidth, is +/- 878.69 days. b, the bias bandwidth, is +/- 1540.99 days. This bandwidth is used for both the bias-corrected and robust estimators when RDA is performed with rdrobust.
+
+```{r}
+bw <- bandwidth$bws[1][1] # Store the bandwidth value as a variable
+```
+
+A scatter plot with the bandwidth plotted on top of the data will help visualize the analysis that will be performed:
+
+```{r}
+avo_plot + geom_vline(xintercept = as.numeric(cutpoint), linetype = "dashed") + geom_vline(xintercept = as.numeric(cutpoint) + c(bw, -bw))
+```
+Additionally adding the regression lines within the bandwidth on either side of cutpoint, will further aid in visualizing the analysis:
+
+```{r}
+# Create new data frame with just the data within the bandwith on eitherside of the cutpoint
+avocado_bw <- avocado_grouped %>% filter(as.numeric(Time) > (as.numeric(cutpoint) -bw) & as.numeric(Time) < (as.numeric(cutpoint)+bw)) 
+
+
+avo_plot + geom_vline(xintercept = as.numeric(cutpoint), linetype = "dashed") + geom_vline(xintercept = as.numeric(cutpoint) + c(-bw, bw)) + geom_smooth(data = avocado_bw, aes(x= Time, y = Trade_Value, group = group), color = "black", method = lm)
+```
+
+Plotting the regression lines within the bandwidth on either side of the cutpoint shows that there is a difference in the slope of both regression lines. The slope of the regression line after the cutpoint does appear to be larger than the slope before the cutpoint. Performing the RDA will determine whether this difference is statistically significant and, thus, whether the 'Avocados from Mexico' campaigns had an effect on mexican avocado sales.
+
+## Perform RDA
+
+```{r}
+rda <- rdrobust(y=avocado$Trade_Value, x= as.numeric(avocado$Time), c = as.numeric(cutpoint)) 
+
+print(rda)
+```
+Printing the rda shows that there are a total of 36 observations before the cutpoint and 36 observations after the cutpoint. The Effective Number of Observations demonstrates that 9 observations were within the bandwidth to the left of the cutpoint and 10 observations were within the bandwidth to the right of the cutpoint.
+
+```{r}
+str(rda)
+```
+
+```{r}
+rda$coef
+```
+The regression slope (within the bandwidth) before the cutpoint was -0.01658 less than the slope after the cutpoint. When the larger (bias or b) bandwidth was used (1447 days instead of 874 days), the difference in slopes before and after the cutpoint was larger -0.098464.
+
+The standard error of the coefficient gives an indication of how meaningful this difference is:
+
+```{r}
+rda$se
+```
+-0.01658 +/- a standard error of 0.46 leads to a complete difference on the slope value. Thus, taking the standard error into account, there is not a large difference in the slopes.
+
+The p-value will indicate whether this difference is statistically significant:
+
+```{r}
+rda$pv
+```
+Here, the p-value being much higher than the cut-off of 0.05 indicates that the difference in regression slopes before and after the cutpoint, but within the bandwidth, is not statistically different.
+
+# Conclusions & Next Steps
+
+This analysis showed that, based on the available data, the 'Avocados from Mexico' campaigns did not have a causal relationship with the surge in avocado sales observed in the last years in Mexico. 
+
+It remains important to remember that there are many other variables at play that could not be controlled for in this analysis.The impact of economical regulations, as well as government funding programs may have a higher impact on the overall sales than the efforts of a particular company.
+
+In this context, it is useful to consider the assumptions for regression discontinuity analysis:
+
+1. The treatment variable impacts the outcome, but not any of the other variables.
+2. The treatment assignment happens only at ONE cutpoint value of the forcing variable.
+3. Treatment assignment is independent of the potential outcomes within a narrow interval around the cutpoint.
+4. Counterfactual outcomes can be modeled within the interval around the cutpoint.
+
+It is difficult to be sure that all four assumptions are met in a real dataset, such as the one used in this analysis. Importantly, the treatment assignment in this case does not occur at only one cutpoint value in this case. While the media campaigns have a marked start, the increasing exposure year to year may have had an impact on the consumer perception and therefore its purchases. As a result, a fuzzy RDA may have been more appropriate.
+
+Furthermore, a more complete analysis might have been possible if we would have data for sales to the US alone; also if the sales information was aggregated by month instead of by quarter, we might have had a better outcome for this study.
+
+In sum, this work could be built upon by finding more complete or less aggregated datasets and by applying a fuzzy RDA. Nevertheless, the coarse-resolution causal inference analysis presented here showed that with regards to the information available, Avocados from Mexico's campaigns are not causally related to mexican avocado sales in recent years.
